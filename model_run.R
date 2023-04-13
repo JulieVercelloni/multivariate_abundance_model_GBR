@@ -115,7 +115,7 @@ pred.sum.fit<- pred.gather %>%
   group_by(group,reef,year)%>%
   summarize(pred.mean=mean(MCMC.pred))
 
-############################### Get the 95% CrI
+# Get the 95% CrI
 p <- c(0.025, 0.5, 0.975)
 
 p_names <- map_chr(p, ~paste0(.x*100, "%"))
@@ -126,4 +126,68 @@ p_funs <- map(p, ~partial(quantile, probs = .x, na.rm = TRUE)) %>%
 quant_fg <-pred.gather %>% 
   group_by(group) %>% 
   summarize_at(vars(diff), funs(!!!p_funs))
+
+############# Predict on new data
+
+# #################################################### Extract parameters
+
+x <- rstan::extract(fitlinear, pars= "x")[[1]]
+
+beta0 <- rstan::extract(fitlinear, pars= "beta0")[[1]]
+beta1 <- rstan::extract(fitlinear, pars= "beta1")[[1]]
+beta2 <- rstan::extract(fitlinear, pars= "beta2")[[1]]
+beta3 <- rstan::extract(fitlinear, pars= "beta3")[[1]]
+LSigma <- rstan::extract(fitlinear, pars = "LSigma")[[1]]
+
+
+########################################################## DISTURBANCES SCENARIOS
+n.scenario<-14
+cycl.sim<-c(0,1,0,1,1,2,2,3,1,3,2,3,4,3)
+bleach.sim<-c(0,0,1,1,2,1,2,1,3,2,3,3,3,4)
+both.sim<-cycl.sim*bleach.sim
+
+dist.sim<-cbind(cycl.sim,bleach.sim,both.sim)%>%data.frame%>%
+  mutate(Scenario=rep(1:n.scenario))
+
+dist.sim$Scenario.name<-c("No disturbance","1 cyclone","1 bleaching","1 cyclone & 1 bleaching", "1 cyclone & 2 bleaching",
+                          "2 cyclones & 1 bleaching","2 cyclones & 2 bleaching","3 cyclones & 1 bleaching",
+                          "1 cyclone & 3 bleaching","3 cyclones & 2 bleaching","2 cyclones & 3 bleaching",
+                          "3 cyclones & 3 bleaching","4 cyclones & 3 bleaching","3 cyclones & 4 bleaching")
+
+x <- list()
+rho<-list()
+for(i in 1: n.scenario){
+  x[[i]] <- beta0 + beta1 * dist.sim[i,1] + beta2 * dist.sim[i,2] + beta3 * dist.sim[i,3]
+  rho[[i]] <- compositions::ilrInv(x[[i]], sbp.tot)
+}
+
+rho.table <- do.call("rbind",rho)
+rho.table <- rho.table%>%data.frame()%>%mutate(n.iter=rep(seq(1:(nrow(rho.table)/n.scenario)),n.scenario))%>%
+  mutate(Scenario=rep(1:n.scenario,each=nrow(rho.table)/n.scenario))
+
+rho.gather <- rho.table %>% pivot_longer(1:3, names_to = "group", values_to = "prediction")
+
+rho.sum <- rho.gather %>% 
+  group_by(Scenario,group) %>% 
+  summarise(Proportion=mean(prediction),Lower=quantile(prediction, probs=0.025),
+             Upper=quantile(prediction, probs=0.975))
+
+rho.sum<-inner_join(rho.sum,dist.sim)
+
+# Using no distrubance as baseline 
+
+baseline <- rho.sum %>%
+  filter(Scenario == 1) %>% 
+  dplyr::select(Scenario.name,group, Value1 = Proportion,Value.low=Lower,
+                Value.high=Upper) 
+
+rho.sum$Value.base=rep(baseline$Value1,each=n.scenario)
+rho.sum$Value.base.low=rep(baseline$Value.low,each=n.scenario)
+rho.sum$Value.base.upp=rep(baseline$Value.high,each=n.scenario)
+
+rho.sum.diff<- rho.sum %>%
+  mutate(Diff = Proportion -Value.base) %>%
+  mutate(Diff.low = Lower -Value.base.low) %>%
+  mutate(Diff.upper = Upper -Value.base.upp) %>%
+  dplyr::select(.,-c(Value.base,Value.base.low,Value.base.upp))
 
